@@ -75,3 +75,52 @@ jobs:
       - name: Deconnexion
         if: always()
         run: docker logout
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    concurrency:
+      group: clienthub-azure
+      cancel-in-progress: false
+    env:
+      AZURE_HOST: ${{ secrets.AZURE_HOST }}
+      AZURE_USER: ${{ secrets.AZURE_USER }}
+      AZURE_SSH_KEY: ${{ secrets.AZURE_SSH_KEY }}
+      AZURE_KNOWN_HOSTS: ${{ secrets.AZURE_KNOWN_HOSTS }}
+      IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/clienthub-api
+    steps:
+      - name: Configurer SSH
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$AZURE_SSH_KEY" > ~/.ssh/clienthub
+          printf '%s\n' "$AZURE_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/clienthub ~/.ssh/known_hosts
+
+      - name: Deployer sur Azure
+        run: |
+          ssh -i ~/.ssh/clienthub -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$AZURE_USER@$AZURE_HOST" \
+            bash -s -- "$IMAGE:$GITHUB_SHA" <<'REMOTE'
+          set -eu
+          docker pull "$1"
+          if docker container inspect clienthub-jason >/dev/null 2>&1; then
+            docker rm -f clienthub-jason
+          fi
+          docker run -d --name clienthub-jason --restart unless-stopped \
+            -p 8023:5000 "$1"
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:8023/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs clienthub-jason
+          exit 1
+          REMOTE
+
+      - name: Verifier l'acces public
+        run: |
+          curl --fail --show-error --retry 5 --retry-connrefused \
+            --connect-timeout 10 --max-time 20 \
+            "http://$AZURE_HOST:8023/health"
